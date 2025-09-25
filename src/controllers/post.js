@@ -18,12 +18,13 @@ let posts = [
       description: "Intel Core i7 thế hệ 13, 16 nhân 24 luồng, xung nhịp tối đa 5.4GHz, socket LGA1700."
     }
   ];
-export function getPosts(req, res){
-    const { title } = req.query;
-    let result = posts;
+  export function getPosts(req, res) {
+    const { title } = req.query; 
+    let result = posts; 
     if (title) {
+
         result = posts.filter(p =>
-            p.title.toLowerCase().includes(title.toLowerCase())
+            p.title.toLowerCase() === title.toLowerCase()
         );
     }
     if (result.length === 0) {
@@ -31,6 +32,7 @@ export function getPosts(req, res){
     }
     res.json(result);
 }
+
 export function getPostsById(req,res){
     const post = posts.find(p => p.id === +req.params.id);
     post ? res.json(post) : res.status(404).json({ error: "Không tìm thấy sản phẩm" });
