@@ -2,101 +2,139 @@ import express from "express";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import Joi from "joi";
 
 const app = express();
 app.use(express.json());
 
-// Kết nối MongoDB
-mongoose
-  .connect("mongodb://localhost:27017/kiemtra_nodejs_fa25")
+mongoose.connect("mongodb://localhost:27017/kientra_nodejs_fa25")
   .then(() => console.log(" Connected to MongoDB"))
-  .catch((err) => console.error(" Could not connect:", err));
+  .catch(err => console.error(" MongoDB error:", err));
 
-const courseSchema = new mongoose.Schema({
-  courseName: String,
-  views: Number,
-  thumbnail: String,
-  note: String,
-  category: String,
-});
-const Course = mongoose.model("Course", courseSchema);
-
-
-const validateToken = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header) return res.json("Thiếu token");
-
-  const token = header.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, "khoa-bi-mat");
-    req.user = decoded;
-    next();
-  } catch (error) {
-    res.json("Token không hợp lệ hoặc hết hạn");
-  }
-};
 
 const userSchema = new mongoose.Schema({
-    email: String,
-    password: String,
-    role: { type: String, enum: ["user", "admin"], default: "user" },
-  });
-  const User = mongoose.model("User", userSchema);
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  role: { type: String, default: "user" },
+});
+const User = mongoose.model("User", userSchema);
+
+const registerSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().min(6).required(),
+});
+const loginSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().required(),
+});
 
 app.post("/auth/register", async (req, res) => {
   try {
-    const existed = await User.findOne({ email: req.body.email });
-    if (existed) return res.json("Email đã tồn tại");
+    const { error } = registerSchema.validate(req.body);
+    if (error) return res.status(400).json({ message: error.details[0].message });
 
-    const hash = await bcrypt.hash(req.body.password, 10);
-    const user = await User.create({ email: req.body.email, password: hash });
-    res.json(user);
+    const { email, password } = req.body;
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ message: "Email đã tồn tại" });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({ email, password: hashed });
+    res.status(201).json({ message: "Đăng ký thành công", user });
   } catch (err) {
-    res.json(err.message);
+    res.status(500).json({ message: "Lỗi server", err });
   }
 });
 
 app.post("/auth/login", async (req, res) => {
   try {
-    const user = await User.findOne({ email: req.body.email });
-    if (!user) return res.json("Không tồn tại email này");
+    const { error } = loginSchema.validate(req.body);
+    if (error) return res.status(400).json({ message: error.details[0].message });
 
-    const match = await bcrypt.compare(req.body.password, user.password);
-    if (!match) return res.json("Sai mật khẩu");
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: "Sai email hoặc mật khẩu" });
 
-    const token = jwt.sign({ id: user._id }, "khoa-bi-mat", { expiresIn: "1d" });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ message: "Sai email hoặc mật khẩu" });
+
+    const token = jwt.sign(
+      { id: user._id, email: user.email, role: user.role },
+      "secret_key",
+      { expiresIn: "2h" }
+    );
     res.json({ message: "Đăng nhập thành công", token });
   } catch (err) {
-    res.json(err.message);
+    res.status(500).json({ message: "Lỗi server", err });
   }
 });
 
-app.get("/courses", async (req, res) => {
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer "))
+    return res.status(401).json({ message: "Không có token" });
+
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, "secret_key", (err, user) => {
+    if (err) return res.status(403).json({ message: "Token không hợp lệ" });
+    req.user = user;
+    next();
+  });
+};
+
+
+const courseSchema = new mongoose.Schema({
+  courseName: { type: String, required: true },
+  views: { type: Number, required: true, min: 1 },
+  thumbnail: { type: String, required: true },
+  note: String,
+  category: { type: String, required: true },
+});
+const Course = mongoose.model("Course", courseSchema);
+
+const courseJoi = Joi.object({
+  courseName: Joi.string().required(),
+  views: Joi.number().min(1).required(),
+  thumbnail: Joi.string().uri().required(),
+  note: Joi.string().optional(),
+  category: Joi.string().required(),
+});
+
+app.get("/courses", verifyToken, async (req, res) => {
   const data = await Course.find();
   res.json(data);
 });
 
-app.get("/courses/:id", async (req, res) => {
-  const data = await Course.findById(req.params.id);
-  if (!data) return res.json("Không tìm thấy");
-  res.json(data);
+app.get("/courses/:id", verifyToken, async (req, res) => {
+  try {
+    const course = await Course.findById(req.params.id);
+    if (!course) return res.status(404).json({ message: "Không tìm thấy khóa học" });
+    res.json(course);
+  } catch {
+    res.status(400).json({ message: "ID không hợp lệ" });
+  }
 });
 
-app.post("/courses", validateToken, async (req, res) => {
-  const data = await Course.create(req.body);
-  res.json(data);
+app.post("/courses", verifyToken, async (req, res) => {
+  const { error } = courseJoi.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+  const newCourse = await Course.create(req.body);
+  res.status(201).json(newCourse);
 });
 
-app.put("/courses/:id", validateToken, async (req, res) => {
-  const data = await Course.findByIdAndUpdate(req.params.id, req.body, { new: true });
-  if (!data) return res.json("Không tìm thấy");
-  res.json(data);
+app.put("/courses/:id", verifyToken, async (req, res) => {
+  const { error } = courseJoi.validate(req.body);
+  if (error) return res.status(400).json({ message: error.details[0].message });
+
+  const updated = await Course.findByIdAndUpdate(req.params.id, req.body, { new: true });
+  if (!updated) return res.status(404).json({ message: "Không tìm thấy khóa học" });
+  res.json(updated);
 });
 
-app.delete("/courses/:id", validateToken, async (req, res) => {
-  const data = await Course.findByIdAndDelete(req.params.id);
-  if (!data) return res.json("Không tìm thấy");
-  res.json("Xóa thành công");
+app.delete("/courses/:id", verifyToken, async (req, res) => {
+  const deleted = await Course.findByIdAndDelete(req.params.id);
+  if (!deleted) return res.status(404).json({ message: "Không tìm thấy khóa học" });
+  res.json({ message: "Đã xóa thành công" });
 });
+
 
 app.listen(3000, () => console.log("🚀 Server running: http://localhost:3000"));
